@@ -19,7 +19,7 @@ class SnapshotUpdater(
     private val snapshotFactory = EnvoySnapshotFactory(
         ingressRoutesFactory = EnvoyIngressRoutesFactory(properties),
         egressRoutesFactory = EnvoyEgressRoutesFactory(properties),
-        clustersFactory = EnvoyClustersFactory(properties),
+        clustersFactory = EnvoyClustersFactory(properties, serviceTagFilter),
         snapshotsVersions = versions,
         properties = properties,
         serviceTagFilter = serviceTagFilter
