@@ -104,6 +104,7 @@ class MetadataNodeGroup(
             ?: ListenersConfig.defaultAddUpstreamExternalAddressHeader
         val hasStaticSecretsDefined = metadata.fieldsMap["has_static_secrets_defined"]?.boolValue
             ?: ListenersConfig.defaultHasStaticSecretsDefined
+        val validationContextSecretFilename = metadata.fieldsMap["validation_context_secret_filename"]?.stringValue
 
         return ListenersConfig(
                 listenersHostPort.ingressHost,
@@ -117,7 +118,8 @@ class MetadataNodeGroup(
                 resourcesDir,
                 addUpstreamExternalAddressHeader,
                 accessLogFilterSettings,
-                hasStaticSecretsDefined
+                hasStaticSecretsDefined,
+                validationContextSecretFilename
         )
     }
 

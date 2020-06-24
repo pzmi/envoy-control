@@ -33,7 +33,8 @@ data class ListenersConfig(
     val resourcesDir: String = defaultResourcesDir,
     val addUpstreamExternalAddressHeader: Boolean = defaultAddUpstreamExternalAddressHeader,
     val accessLogFilterSettings: AccessLogFilterSettings,
-    val hasStaticSecretsDefined: Boolean = defaultHasStaticSecretsDefined
+    val hasStaticSecretsDefined: Boolean = defaultHasStaticSecretsDefined,
+    val validationContextSecretFilename: String?
 ) {
 
     companion object {
