@@ -3,6 +3,8 @@
 package pl.allegro.tech.servicemesh.envoycontrol.snapshot
 
 import io.envoyproxy.envoy.api.v2.Cluster
+import io.envoyproxy.envoy.api.v2.auth.TlsParameters
+import pl.allegro.tech.servicemesh.envoycontrol.groups.PathMatchingType
 import java.time.Duration
 
 class SnapshotProperties {
@@ -20,10 +22,16 @@ class SnapshotProperties {
     var staticClusterConnectionTimeout: Duration = Duration.ofSeconds(2)
     var trustedCaFile = "/etc/ssl/certs/ca-certificates.crt"
     var dynamicListeners = ListenersFactoryProperties()
+    var enabledCommunicationModes = EnabledCommunicationModes()
+    var shouldSendMissingEndpoints = false
+    var metrics: MetricsProperties = MetricsProperties()
+}
+
+class MetricsProperties {
+    var cacheSetSnapshot = false
 }
 
 class ListenersFactoryProperties {
-    val initialVersion: String = "empty"
     var enabled = true
     var httpFilters = HttpFiltersProperties()
 }
@@ -36,24 +44,60 @@ class HttpFiltersProperties {
 class AccessLogProperties {
     var timeFormat = "%START_TIME(%FT%T.%3fZ)%"
     var messageFormat = "%PROTOCOL% %REQ(:METHOD)% %REQ(:authority)% %REQ(:PATH)% " +
-            "%DOWNSTREAM_REMOTE_ADDRESS% -> %UPSTREAM_HOST%"
+        "%DOWNSTREAM_REMOTE_ADDRESS% -> %UPSTREAM_HOST%"
     var level = "TRACE"
     var logger = "envoy.AccessLog"
 }
 
 class OutgoingPermissionsProperties {
     var enabled = false
-    var allServicesDependenciesValue = "*"
+    var allServicesDependencies = AllServicesDependenciesProperties()
     var servicesAllowedToUseWildcard: MutableSet<String> = mutableSetOf()
 }
 
+class AllServicesDependenciesProperties {
+    var identifier = "*"
+    var notIncludedByPrefix: MutableSet<String> = mutableSetOf()
+}
+
+typealias Client = String
+
 class IncomingPermissionsProperties {
     var enabled = false
-    /**
-     * unavailable = not found || unauthorized
-     */
-    var endpointUnavailableStatusCode = 503
     var clientIdentityHeader = "x-service-name"
+    var sourceIpAuthentication = SourceIpAuthenticationProperties()
+    var selectorMatching: MutableMap<Client, SelectorMatching> = mutableMapOf()
+    var tlsAuthentication = TlsAuthenticationProperties()
+}
+
+class SelectorMatching {
+    var header = ""
+}
+
+class TlsAuthenticationProperties {
+    var tlsContextMetadataMatchKey = "acceptMTLS"
+    var protocol = TlsProtocolProperties()
+    /** if true, a request without a cert will be rejected during handshake and will not reach RBAC filter */
+    var requireClientCertificate: Boolean = false
+    var validationContextSecretName: String = "validation_context"
+    var tlsCertificateSecretName: String = "server_cert"
+    var mtlsEnabledTag: String = "mtls:enabled"
+    var sanUriFormat: String = "spiffe://{service-name}"
+}
+
+class TlsProtocolProperties {
+    var cipherSuites: List<String> = listOf("ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-RSA-AES128-GCM-SHA256")
+    var minimumVersion = TlsParameters.TlsProtocol.TLSv1_2
+    var maximumVersion = TlsParameters.TlsProtocol.TLSv1_2
+}
+
+class SourceIpAuthenticationProperties {
+    var ipFromServiceDiscovery = IpFromServiceDiscovery()
+    var ipFromRange: MutableMap<Client, Set<String>> = mutableMapOf()
+}
+
+class IpFromServiceDiscovery {
+    var enabledForIncomingServices: List<String> = listOf()
 }
 
 class LoadBalancingProperties {
@@ -75,7 +119,6 @@ class LoadBalancingWeightsProperties {
 }
 
 class RoutesProperties {
-    var initialVersion = "empty"
     var admin = AdminRouteProperties()
     var status = StatusRouteProperties()
     var authorization = AuthorizationProperties()
@@ -111,8 +154,13 @@ class AdminRouteProperties {
 
 class StatusRouteProperties {
     var enabled = false
-    var pathPrefix = "/status/"
+    var endpoints: MutableList<EndpointMatch> = mutableListOf()
     var createVirtualCluster = false
+}
+
+class EndpointMatch {
+    var path = "/status/"
+    var matchingType: PathMatchingType = PathMatchingType.PATH_PREFIX
 }
 
 class AdminDisableProperties {
@@ -123,6 +171,7 @@ class AdminDisableProperties {
 class LocalServiceProperties {
     var idleTimeout: Duration = Duration.ofSeconds(60)
     var responseTimeout: Duration = Duration.ofSeconds(15)
+    var connectionIdleTimeout: Duration = Duration.ofSeconds(120)
     var retryPolicy: RetryPoliciesProperties = RetryPoliciesProperties()
 }
 
@@ -167,6 +216,8 @@ class EgressProperties {
     var handleInternalRedirect = false
     var http2 = Http2Properties()
     var commonHttp = CommonHttpProperties()
+    var neverRemoveClusters = true
+    var hostHeaderRewriting = HostHeaderRewritingProperties()
 }
 
 class CommonHttpProperties {
@@ -190,4 +241,14 @@ class Threshold(var priority: String) {
 class Http2Properties {
     var enabled = true
     var tagName = "envoy"
+}
+
+class EnabledCommunicationModes {
+    var ads = true
+    var xds = true
+}
+
+class HostHeaderRewritingProperties {
+    var enabled = false
+    var customHostHeader = "x-envoy-original-host"
 }

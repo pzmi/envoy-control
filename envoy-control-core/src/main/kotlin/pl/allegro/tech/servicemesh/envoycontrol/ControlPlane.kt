@@ -1,7 +1,6 @@
 package pl.allegro.tech.servicemesh.envoycontrol
 
 import io.envoyproxy.controlplane.cache.NodeGroup
-import io.envoyproxy.controlplane.cache.SimpleCache
 import io.envoyproxy.controlplane.cache.SnapshotCache
 import io.envoyproxy.controlplane.server.DefaultExecutorGroup
 import io.envoyproxy.controlplane.server.DiscoveryServer
@@ -21,9 +20,20 @@ import pl.allegro.tech.servicemesh.envoycontrol.server.ServerProperties
 import pl.allegro.tech.servicemesh.envoycontrol.server.callbacks.CompositeDiscoveryServerCallbacks
 import pl.allegro.tech.servicemesh.envoycontrol.server.callbacks.LoggingDiscoveryServerCallbacks
 import pl.allegro.tech.servicemesh.envoycontrol.server.callbacks.MeteredConnectionsCallbacks
-import pl.allegro.tech.servicemesh.envoycontrol.services.LocalityAwareServicesState
-import pl.allegro.tech.servicemesh.envoycontrol.snapshot.listeners.filters.EnvoyHttpFilters
+import pl.allegro.tech.servicemesh.envoycontrol.services.MultiClusterState
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.clusters.EnvoyClustersFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.routes.EnvoyEgressRoutesFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.routes.EnvoyIngressRoutesFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.EnvoySnapshotFactory
 import pl.allegro.tech.servicemesh.envoycontrol.snapshot.SnapshotUpdater
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.SnapshotsVersions
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.endpoints.EnvoyEndpointsFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.listeners.EnvoyListenersFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.listeners.filters.AccessLogFilterFactory
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.listeners.filters.EnvoyHttpFilters
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.routes.ServiceTagMetadataGenerator
+import pl.allegro.tech.servicemesh.envoycontrol.utils.DirectScheduler
+import pl.allegro.tech.servicemesh.envoycontrol.utils.ParallelScheduler
 import reactor.core.Disposable
 import reactor.core.publisher.Flux
 import reactor.core.scheduler.Schedulers
@@ -41,7 +51,7 @@ class ControlPlane private constructor(
     val snapshotUpdater: SnapshotUpdater,
     val nodeGroup: NodeGroup<Group>,
     val cache: SnapshotCache<Group>,
-    private val changes: Flux<List<LocalityAwareServicesState>>
+    private val changes: Flux<MultiClusterState>
 ) : AutoCloseable {
 
     private var servicesDisposable: Disposable? = null
@@ -73,15 +83,19 @@ class ControlPlane private constructor(
         var grpcServerExecutor: Executor? = null
         var nioEventLoopExecutor: Executor? = null
         var executorGroup: ExecutorGroup? = null
-        var updateSnapshotExecutor: Executor? = null
-        var metrics: EnvoyControlMetrics = DefaultEnvoyControlMetrics()
+        var globalSnapshotExecutor: Executor? = null
+        var groupSnapshotParallelExecutorSupplier: () -> Executor? = { null }
+        var metrics: EnvoyControlMetrics = DefaultEnvoyControlMetrics(meterRegistry = meterRegistry)
         var envoyHttpFilters: EnvoyHttpFilters = EnvoyHttpFilters.emptyFilters
 
+        val accessLogFilterFactory = AccessLogFilterFactory()
+
         var nodeGroup: NodeGroup<Group> = MetadataNodeGroup(
-            properties = properties.envoy.snapshot
+            properties = properties.envoy.snapshot,
+            accessLogFilterFactory = accessLogFilterFactory
         )
 
-        fun build(changes: Flux<List<LocalityAwareServicesState>>): ControlPlane {
+        fun build(changes: Flux<MultiClusterState>): ControlPlane {
             if (grpcServerExecutor == null) {
                 grpcServerExecutor = ThreadPoolExecutor(
                     properties.server.serverPoolSize,
@@ -104,6 +118,10 @@ class ControlPlane private constructor(
                 executorGroup = when (properties.server.executorGroup.type) {
                     ExecutorType.DIRECT -> DefaultExecutorGroup()
                     ExecutorType.PARALLEL -> {
+                        // TODO(https://github.com/allegro/envoy-control/issues/103) this implementation of parallel
+                        //   executor group is invalid, because it may lead to sending XDS responses out of order for
+                        //   given DiscoveryRequestStreamObserver. We should switch to multiple, single-threaded
+                        //   ThreadPoolExecutors. More info in linked task.
                         val executor = Executors.newFixedThreadPool(
                             properties.server.executorGroup.parallelPoolSize,
                             ThreadNamingThreadFactory("discovery-responses-executor")
@@ -113,15 +131,34 @@ class ControlPlane private constructor(
                 }
             }
 
-            if (updateSnapshotExecutor == null) {
-                updateSnapshotExecutor = Executors.newSingleThreadExecutor(ThreadNamingThreadFactory("snapshot-update"))
+            if (globalSnapshotExecutor == null) {
+                globalSnapshotExecutor = Executors.newFixedThreadPool(
+                    properties.server.globalSnapshotUpdatePoolSize,
+                    ThreadNamingThreadFactory("snapshot-update")
+                )
             }
 
-            val cache = SimpleCache(nodeGroup)
+            val groupSnapshotProperties = properties.server.groupSnapshotUpdateScheduler
+
+            val groupSnapshotScheduler = when (groupSnapshotProperties.type) {
+                ExecutorType.DIRECT -> DirectScheduler
+                ExecutorType.PARALLEL -> ParallelScheduler(
+                    scheduler = Schedulers.fromExecutor(
+                        groupSnapshotParallelExecutorSupplier()
+                            ?: Executors.newFixedThreadPool(
+                                groupSnapshotProperties.parallelPoolSize,
+                                ThreadNamingThreadFactory("group-snapshot")
+                            )
+                    ),
+                    parallelism = groupSnapshotProperties.parallelPoolSize
+                )
+            }
+
+            val cache = SimpleCache(nodeGroup, properties.envoy.snapshot.shouldSendMissingEndpoints)
 
             val cleanupProperties = properties.server.snapshotCleanup
 
-            val groupChangeWatcher = GroupChangeWatcher(cache, metrics)
+            val groupChangeWatcher = GroupChangeWatcher(cache, metrics, meterRegistry)
 
             val discoveryServer = DiscoveryServer(
                 listOf(
@@ -150,7 +187,26 @@ class ControlPlane private constructor(
                 ),
                 groupChangeWatcher,
                 executorGroup,
-                CachedProtoResourcesSerializer()
+                CachedProtoResourcesSerializer(meterRegistry, properties.server.reportProtobufCacheMetrics)
+            )
+
+            val snapshotsVersions = SnapshotsVersions()
+            val snapshotProperties = properties.envoy.snapshot
+            val envoySnapshotFactory = EnvoySnapshotFactory(
+                ingressRoutesFactory = EnvoyIngressRoutesFactory(snapshotProperties),
+                egressRoutesFactory = EnvoyEgressRoutesFactory(snapshotProperties),
+                clustersFactory = EnvoyClustersFactory(snapshotProperties),
+                endpointsFactory = EnvoyEndpointsFactory(
+                    snapshotProperties, ServiceTagMetadataGenerator(snapshotProperties.routing.serviceTags)
+                ),
+                listenersFactory = EnvoyListenersFactory(
+                    snapshotProperties,
+                    envoyHttpFilters
+                ),
+                // Remember when LDS change we have to send RDS again
+                snapshotsVersions = snapshotsVersions,
+                properties = snapshotProperties,
+                meterRegistry = meterRegistry
             )
 
             return ControlPlane(
@@ -158,9 +214,12 @@ class ControlPlane private constructor(
                 SnapshotUpdater(
                     cache,
                     properties.envoy.snapshot,
-                    Schedulers.fromExecutor(updateSnapshotExecutor!!),
+                    envoySnapshotFactory,
+                    Schedulers.fromExecutor(globalSnapshotExecutor!!),
+                    groupSnapshotScheduler,
                     groupChangeWatcher.onGroupAdded(),
                     meterRegistry,
+                    snapshotsVersions,
                     envoyHttpFilters
                 ),
                 nodeGroup,
@@ -189,8 +248,13 @@ class ControlPlane private constructor(
             return this
         }
 
-        fun withUpdateSnapshotExecutor(executor: Executor): ControlPlaneBuilder {
-            updateSnapshotExecutor = executor
+        fun withGlobalSnapshotExecutor(executor: Executor): ControlPlaneBuilder {
+            globalSnapshotExecutor = executor
+            return this
+        }
+
+        fun withGroupSnapshotParallelExecutor(executorSupplier: () -> Executor): ControlPlaneBuilder {
+            groupSnapshotParallelExecutorSupplier = executorSupplier
             return this
         }
 

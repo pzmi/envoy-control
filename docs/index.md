@@ -1,4 +1,4 @@
-# Envoy Control
+# ![logo](assets/images/logo.png) Envoy Control
 
 Envoy Control is a production-ready Control Plane for Service Mesh based on [Envoy Proxy](https://www.envoyproxy.io/)
 Data Plane that is platform agnostic.
@@ -12,6 +12,7 @@ Data Plane that is platform agnostic.
 * [Observability](deployment/observability.md)
 * [Weighted load balancing and canary support](features/load_balancing.md)
 * [Service tags routing support](features/service_tags.md)
+* [Access log filter](features/access_log_filter.md)
 
 ## Why another Control Plane?
 Our use case for Service Mesh is running 800 microservices on [Mesos](https://mesos.apache.org/) / [Marathon](https://mesosphere.github.io/marathon/) stack.

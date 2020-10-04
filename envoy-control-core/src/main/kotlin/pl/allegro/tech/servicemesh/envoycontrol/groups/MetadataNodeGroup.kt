@@ -4,20 +4,18 @@ import com.google.protobuf.Struct
 import com.google.protobuf.Value
 import io.envoyproxy.controlplane.cache.NodeGroup
 import io.envoyproxy.envoy.api.v2.core.Node
+
 import pl.allegro.tech.servicemesh.envoycontrol.logger
 import pl.allegro.tech.servicemesh.envoycontrol.snapshot.SnapshotProperties
+import pl.allegro.tech.servicemesh.envoycontrol.snapshot.resource.listeners.filters.AccessLogFilterFactory
 
-class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
+class MetadataNodeGroup(
+    val properties: SnapshotProperties,
+    val accessLogFilterFactory: AccessLogFilterFactory
+) : NodeGroup<Group> {
     private val logger by logger()
 
-    override fun hash(node: Node): Group {
-        val ads = node.metadata
-            .fieldsMap["ads"]
-            ?.boolValue
-            ?: false
-
-        return createGroup(node, ads)
-    }
+    override fun hash(node: Node): Group = createGroup(node)
 
     @SuppressWarnings("ReturnCount")
     private fun metadataToListenersHostPort(
@@ -76,6 +74,9 @@ class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
         val ingressPortValue = metadata.fieldsMap["ingress_port"]
         val egressHostValue = metadata.fieldsMap["egress_host"]
         val egressPortValue = metadata.fieldsMap["egress_port"]
+        val accessLogFilterSettings = AccessLogFilterSettings(
+            metadata.fieldsMap["access_log_filter"], accessLogFilterFactory
+        )
 
         val listenersHostPort = metadataToListenersHostPort(
                 id,
@@ -99,6 +100,10 @@ class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
                 ?: ListenersConfig.defaultAccessLogPath
         val resourcesDir = metadata.fieldsMap["resources_dir"]?.stringValue
                 ?: ListenersConfig.defaultResourcesDir
+        val addUpstreamExternalAddressHeader = metadata.fieldsMap["add_upstream_external_address_header"]?.boolValue
+            ?: ListenersConfig.defaultAddUpstreamExternalAddressHeader
+        val hasStaticSecretsDefined = metadata.fieldsMap["has_static_secrets_defined"]?.boolValue
+            ?: ListenersConfig.defaultHasStaticSecretsDefined
 
         return ListenersConfig(
                 listenersHostPort.ingressHost,
@@ -109,11 +114,14 @@ class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
                 accessLogEnabled,
                 enableLuaScript,
                 accessLogPath,
-                resourcesDir
+                resourcesDir,
+                addUpstreamExternalAddressHeader,
+                accessLogFilterSettings,
+                hasStaticSecretsDefined
         )
     }
 
-    private fun createGroup(node: Node, ads: Boolean): Group {
+    private fun createGroup(node: Node): Group {
         val metadata = NodeMetadata(node.metadata, properties)
         val serviceName = serviceName(metadata)
         val proxySettings = proxySettings(metadata)
@@ -122,14 +130,14 @@ class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
         return when {
             hasAllServicesDependencies(metadata) ->
                 AllServicesGroup(
-                        ads,
+                        metadata.communicationMode,
                         serviceName,
                         proxySettings,
                         listenersConfig
                 )
             else ->
                 ServicesGroup(
-                        ads,
+                        metadata.communicationMode,
                         serviceName,
                         proxySettings,
                         listenersConfig
@@ -138,14 +146,14 @@ class MetadataNodeGroup(val properties: SnapshotProperties) : NodeGroup<Group> {
     }
 
     private fun hasAllServicesDependencies(metadata: NodeMetadata): Boolean {
-        return !properties.outgoingPermissions.enabled || metadata.proxySettings.outgoing.containsDependencyForService(
-            properties.outgoingPermissions.allServicesDependenciesValue
-        )
+        return !properties.outgoingPermissions.enabled ||
+            metadata.proxySettings.outgoing.allServicesDependencies
     }
 
     private fun serviceName(metadata: NodeMetadata): String {
         return when (properties.incomingPermissions.enabled) {
             true -> metadata.serviceName.orEmpty()
+            // TODO: https://github.com/allegro/envoy-control/issues/91
             false -> ""
         }
     }

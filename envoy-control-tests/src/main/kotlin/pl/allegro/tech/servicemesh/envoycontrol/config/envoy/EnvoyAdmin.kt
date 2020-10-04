@@ -3,13 +3,14 @@ package pl.allegro.tech.servicemesh.envoycontrol.config.envoy
 import com.fasterxml.jackson.annotation.JsonAlias
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import okhttp3.MediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
-import pl.allegro.tech.servicemesh.envoycontrol.config.containers.EchoContainer
+import pl.allegro.tech.servicemesh.envoycontrol.config.service.EchoContainer
 
 class EnvoyAdmin(
     private val address: String,
@@ -42,6 +43,12 @@ class EnvoyAdmin(
                 it.address?.socketAddress?.address == ip
             }
 
+    fun isEndpointHealthy(clusterName: String, ip: String) = hostStatus(clusterName, ip)
+        ?.healthStatus
+        ?.edsHealthStatus == "HEALTHY"
+
+    fun isIngressReady() = statValue("http.ingress_http.rq_total") != "-1"
+
     fun statValue(statName: String): String? = get("stats?filter=$statName").body()?.use {
         val splitedStats = it.string().lines().first().split(":")
         if (splitedStats.size != 2) {
@@ -70,6 +77,7 @@ class EnvoyAdmin(
         val configDump = configDump()
         val bootstrapConfigDump = bootstrapConfigDump(configDump)
         val node = bootstrapConfigDump.at("/bootstrap/node")
+        (node as ObjectNode).remove("hidden_envoy_deprecated_build_version")
         return objectMapper.writeValueAsString(node)
     }
 
@@ -88,12 +96,12 @@ class EnvoyAdmin(
             ?.let { regex.find(it)!!.groupValues[1].toInt() }!!
     }
 
-    fun zone(cluster: String, ip: String): AdminInstance? {
+    fun cluster(cluster: String, ip: String): AdminInstance? {
         val regex = "$cluster::$ip:${EchoContainer.PORT}::zone::(.+)".toRegex()
         val response = get("clusters")
         return response.body()?.use { it.string().lines() }
             ?.find { it.matches(regex) }
-            ?.let { AdminInstance(ip, zone = regex.find(it)!!.groupValues[1]) }
+            ?.let { AdminInstance(ip, cluster = regex.find(it)!!.groupValues[1]) }
     }
 
     private val client = OkHttpClient.Builder()
@@ -116,7 +124,7 @@ class EnvoyAdmin(
                 .build()
         ).execute()
 
-    data class AdminInstance(val ip: String, val zone: String)
+    data class AdminInstance(val ip: String, val cluster: String)
 }
 
 data class ClusterStatuses(

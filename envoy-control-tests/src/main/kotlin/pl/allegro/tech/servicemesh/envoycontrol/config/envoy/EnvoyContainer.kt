@@ -4,22 +4,22 @@ import com.github.dockerjava.api.command.InspectContainerResponse
 import org.springframework.core.io.ClassPathResource
 import org.testcontainers.containers.BindMode
 import org.testcontainers.containers.output.Slf4jLogConsumer
-import org.testcontainers.images.builder.ImageFromDockerfile
-import pl.allegro.tech.servicemesh.envoycontrol.testcontainers.GenericContainer
+import org.testcontainers.images.builder.dockerfile.DockerfileBuilder
+import pl.allegro.tech.servicemesh.envoycontrol.config.EnvoyConfig
+import pl.allegro.tech.servicemesh.envoycontrol.config.containers.SSLGenericContainer
 import pl.allegro.tech.servicemesh.envoycontrol.logger as loggerDelegate
 
 class EnvoyContainer(
-    private val configPath: String,
-    private val localServiceIp: String,
+    private val config: EnvoyConfig,
+    private val localServiceIp: () -> String,
     private val envoyControl1XdsPort: Int,
-    private val envoyControl2XdsPort: Int = envoyControl1XdsPort
-) : GenericContainer<EnvoyContainer>(ImageFromDockerfile().withDockerfileFromBuilder {
-    // We use envoy version from master. This is 1.13.0-dev version with support for KEYS_SUBSET fallback policy,
-    // which is required for service-tags routing. More info: https://github.com/envoyproxy/envoy/pull/8890
-    it.from("envoyproxy/envoy-alpine-dev:b7bef67c256090919a4585a1a06c42f15d640a09")
+    private val envoyControl2XdsPort: Int = envoyControl1XdsPort,
+    private val logLevel: String = "info",
+    image: String = DEFAULT_IMAGE
+) : SSLGenericContainer<EnvoyContainer>(dockerfileBuilder = DockerfileBuilder()
+        .from(image)
         .run("apk --no-cache add curl iproute2")
-        .build()
-}) {
+) {
 
     companion object {
         val logger by loggerDelegate()
@@ -32,6 +32,7 @@ class EnvoyContainer(
 
         const val EGRESS_LISTENER_CONTAINER_PORT = 5000
         const val INGRESS_LISTENER_CONTAINER_PORT = 5001
+        const val DEFAULT_IMAGE = "envoyproxy/envoy-alpine:v1.14.3"
         private const val ADMIN_PORT = 10000
     }
 
@@ -43,7 +44,7 @@ class EnvoyContainer(
             LAUNCH_ENVOY_SCRIPT_DEST,
             BindMode.READ_ONLY
         )
-        withClasspathResourceMapping(configPath, CONFIG_DEST, BindMode.READ_ONLY)
+        withClasspathResourceMapping(config.filePath, CONFIG_DEST, BindMode.READ_ONLY)
 
         if (ClassPathResource(EXTRA_DIR).exists()) {
             withClasspathResourceMapping(EXTRA_DIR, EXTRA_DIR_DEST, BindMode.READ_ONLY)
@@ -57,8 +58,13 @@ class EnvoyContainer(
             Integer.toString(envoyControl1XdsPort),
             Integer.toString(envoyControl2XdsPort),
             CONFIG_DEST,
-            localServiceIp,
-            "-l", "debug"
+            localServiceIp(),
+            config.trustedCa,
+            config.certificateChain,
+            config.privateKey,
+            config.serviceName,
+            "--config-yaml", config.configOverride,
+            "-l", logLevel
         )
     }
 
@@ -69,7 +75,10 @@ class EnvoyContainer(
 
     fun egressListenerUrl() = "http://$containerIpAddress:${getMappedPort(EGRESS_LISTENER_CONTAINER_PORT)}/"
 
-    fun ingressListenerUrl() = "http://$containerIpAddress:${getMappedPort(INGRESS_LISTENER_CONTAINER_PORT)}"
+    fun ingressListenerUrl(secured: Boolean = false): String {
+        val schema = if (secured) "https" else "http"
+        return schema + "://$containerIpAddress:${getMappedPort(INGRESS_LISTENER_CONTAINER_PORT)}"
+    }
 
     fun adminUrl() = "http://$containerIpAddress:${getMappedPort(ADMIN_PORT)}"
 

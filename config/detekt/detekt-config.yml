@@ -47,6 +47,18 @@ potential-bugs:
     active: true
 
 style:
+  excludes:
+    - "**/resources/**"
+    - "**/build/**"
+    - '**/test/**'
+    - '**Test.kt'
+    - '**TestBase.kt'
+    - '**TestConfiguration.kt'
+    - '**Spec.kt'
+    - '**Container.kt'
+    - '**Assertions.kt'
+    - '**Extension.kt'
+    - '**Operations.kt'
   ForbiddenComment:
     active: false # we want to be able to write todo comments
   MagicNumber:
@@ -73,4 +85,6 @@ style:
   VarCouldBeVal:
     active: true
   WildcardImport:
+    active: true
+  MandatoryBracesIfStatements:
     active: true
