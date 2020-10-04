@@ -21,18 +21,7 @@ plugins {
 
 apply plugin: 'io.codearte.nexus-staging'
 
-scmVersion {
-    tag {
-        prefix = project.rootProject.name
-    }
-    versionCreator 'versionWithBranch'
-}
-
 allprojects {
-
-    project.group = 'pl.allegro.tech.servicemesh'
-    project.version = scmVersion.version
-
     repositories {
         jcenter()
         mavenCentral()
