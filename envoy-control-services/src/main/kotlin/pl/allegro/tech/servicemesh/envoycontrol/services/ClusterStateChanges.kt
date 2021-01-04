@@ -4,7 +4,7 @@ import reactor.core.publisher.Flux
 import java.util.concurrent.atomic.AtomicReference
 
 interface ClusterStateChanges {
-    fun stream(): Flux<MultiClusterState>
+    fun stream(): MultiClusterState
 }
 
 interface LocalClusterStateChanges : ClusterStateChanges {

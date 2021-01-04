@@ -40,7 +40,6 @@ import pl.allegro.tech.servicemesh.envoycontrol.utils.ParallelScheduler
 import pl.allegro.tech.servicemesh.envoycontrol.utils.ParallelizableScheduler
 import pl.allegro.tech.servicemesh.envoycontrol.v3.SimpleCache
 import reactor.core.Disposable
-import reactor.core.publisher.Flux
 import reactor.core.scheduler.Schedulers
 import java.time.Clock
 import java.util.concurrent.BlockingQueue
@@ -58,7 +57,7 @@ class ControlPlane private constructor(
     val snapshotUpdater: SnapshotUpdater,
     val nodeGroup: NodeGroup<Group>,
     val cache: SnapshotCache<Group, Snapshot>,
-    private val changes: Flux<MultiClusterState>
+    private val changes: () -> MultiClusterState
 ) : AutoCloseable {
 
     private var servicesDisposable: Disposable? = null
@@ -102,7 +101,7 @@ class ControlPlane private constructor(
             accessLogFilterFactory = accessLogFilterFactory
         )
 
-        fun build(changes: Flux<MultiClusterState>): ControlPlane {
+        fun build(changes: () -> MultiClusterState): ControlPlane {
             if (grpcServerExecutor == null) {
                 grpcServerExecutor = buildThreadPoolExecutor()
             }
@@ -203,7 +202,7 @@ class ControlPlane private constructor(
                     envoySnapshotFactory,
                     Schedulers.fromExecutor(globalSnapshotExecutor!!),
                     groupSnapshotScheduler,
-                    groupChangeWatcher.onGroupAdded(),
+                    groupChangeWatcher,
                     meterRegistry,
                     snapshotsVersions,
                     envoyHttpFilters

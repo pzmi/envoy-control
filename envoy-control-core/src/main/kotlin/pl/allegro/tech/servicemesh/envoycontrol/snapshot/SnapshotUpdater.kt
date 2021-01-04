@@ -15,10 +15,10 @@ import pl.allegro.tech.servicemesh.envoycontrol.utils.ParallelizableScheduler
 import pl.allegro.tech.servicemesh.envoycontrol.utils.doOnNextScheduledOn
 import pl.allegro.tech.servicemesh.envoycontrol.utils.measureBuffer
 import pl.allegro.tech.servicemesh.envoycontrol.utils.noopTimer
-import pl.allegro.tech.servicemesh.envoycontrol.utils.onBackpressureLatestMeasured
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Scheduler
+import java.time.Duration
 
 class SnapshotUpdater(
     private val cache: SnapshotCache<Group, Snapshot>,
@@ -36,47 +36,50 @@ class SnapshotUpdater(
         private val logger by logger()
     }
 
+    @Volatile
+    private var statesAndClusters = StatesAndClusters.initial
+
+    @Volatile
+    private var groups = emptyList<Group>()
+
+    @Volatile
+    private var clusterState = MultiClusterState.empty()
+
+    @Volatile
+    private var adsSnapshot: GlobalSnapshot? = null
+
+    @Volatile
+    private var xdsSnapshot: GlobalSnapshot? = null
+
     private var globalSnapshot: UpdateResult? = null
 
     fun getGlobalSnapshot(): UpdateResult? {
         return globalSnapshot
     }
 
-    fun start(states: Flux<MultiClusterState>): Flux<UpdateResult> {
-        return Flux.merge(
-            1, // prefetch 1, instead of default 32, to avoid processing stale items in case of backpressure
-            // step 1: creates cluster configuration for global snapshot
-            services(states).subscribeOn(globalSnapshotScheduler),
-            // step 2: only watches groups. if groups change we use the last services state and update those groups
-            groups().subscribeOn(globalSnapshotScheduler)
-        )
-            .measureBuffer("snapshot-updater-merged", meterRegistry, innerSources = 2)
-            .checkpoint("snapshot-updater-merged")
-            .name("snapshot-updater-merged").metrics()
-            // step 3: group updates don't provide a snapshot,
-            // so we piggyback the last updated snapshot state for use
-            .scan { previous: UpdateResult, newUpdate: UpdateResult ->
-                UpdateResult(
-                    action = newUpdate.action,
-                    groups = newUpdate.groups,
-                    adsSnapshot = newUpdate.adsSnapshot ?: previous.adsSnapshot,
-                    xdsSnapshot = newUpdate.xdsSnapshot ?: previous.xdsSnapshot
-                )
+    fun start(states: () -> MultiClusterState): Flux<UpdateResult> {
+        return Flux.interval(Duration.ofSeconds(1), globalSnapshotScheduler).map {
+            val newState = states()
+            if (clusterState != newState) {
+                val result = services(newState)
+                adsSnapshot = result.adsSnapshot
+                xdsSnapshot = result.xdsSnapshot
+                updateSnapshotForGroups(result)
             }
-            // concat map guarantees sequential processing (unlike flatMap)
-            .concatMap { result ->
-                val groups = if (result.action == Action.ALL_SERVICES_GROUP_ADDED) {
-                    cache.groups()
-                } else {
-                    result.groups
-                }
 
-                // step 4: update the snapshot for either all groups (if services changed)
-                //         or specific groups (groups changed).
-                // TODO(dj): on what occasion can this be false?
-                if (result.adsSnapshot != null || result.xdsSnapshot != null) {
+            val newGroups = cache.groups().toList()
+            val addedGroups = groups - newGroups
+            groups = newGroups
+
+            if (addedGroups.isNotEmpty()) {
+
+            }
+
+
+            result
+        }.concatMap { result ->
+            if (result.adsSnapshot != null || result.xdsSnapshot != null) {
                     // Stateful operation! This is the meat of this processing.
-                    updateSnapshotForGroups(groups, result)
                 } else {
                     Mono.empty()
                 }
@@ -100,41 +103,27 @@ class SnapshotUpdater(
             }
     }
 
-    internal fun services(states: Flux<MultiClusterState>): Flux<UpdateResult> {
-        return states
-            .sample(properties.stateSampleDuration)
-            .name("snapshot-updater-services-sampled").metrics()
-            .onBackpressureLatestMeasured("snapshot-updater-services-sampled", meterRegistry)
-            // prefetch = 1, instead of default 256, to avoid processing stale states in case of backpressure
-            .publishOn(globalSnapshotScheduler, 1)
-            .measureBuffer("snapshot-updater-services-published", meterRegistry)
-            .checkpoint("snapshot-updater-services-published")
-            .name("snapshot-updater-services-published").metrics()
-            .createClusterConfigurations()
-            .map { (states, clusters) ->
-                var lastXdsSnapshot: GlobalSnapshot? = null
-                var lastAdsSnapshot: GlobalSnapshot? = null
+    internal fun services(states: MultiClusterState): UpdateResult {
+        val new =
+            StatesAndClusters(states, snapshotFactory.clusterConfigurations(states, statesAndClusters.clusters))
+            var lastXdsSnapshot: GlobalSnapshot? = null
+            var lastAdsSnapshot: GlobalSnapshot? = null
 
-                if (properties.enabledCommunicationModes.xds) {
-                    lastXdsSnapshot = snapshotFactory.newSnapshot(states, clusters, XDS)
-                }
-                if (properties.enabledCommunicationModes.ads) {
-                    lastAdsSnapshot = snapshotFactory.newSnapshot(states, clusters, ADS)
-                }
+            if (properties.enabledCommunicationModes.xds) {
+                lastXdsSnapshot = snapshotFactory.newSnapshot(new.states, new.clusters, XDS)
+            }
+            if (properties.enabledCommunicationModes.ads) {
+                lastAdsSnapshot = snapshotFactory.newSnapshot(new.states, new.clusters, ADS)
+            }
 
-                val updateResult = UpdateResult(
-                    action = Action.ALL_SERVICES_GROUP_ADDED,
-                    adsSnapshot = lastAdsSnapshot,
-                    xdsSnapshot = lastXdsSnapshot
-                )
-                globalSnapshot = updateResult
-                updateResult
-            }
-            .onErrorResume { e ->
-                meterRegistry.counter("snapshot-updater.services.updates.errors").increment()
-                logger.error("Unable to process service changes", e)
-                Mono.justOrEmpty(UpdateResult(action = Action.ERROR_PROCESSING_CHANGES))
-            }
+            val updateResult = UpdateResult(
+                action = Action.ALL_SERVICES_GROUP_ADDED,
+                adsSnapshot = lastAdsSnapshot,
+                xdsSnapshot = lastXdsSnapshot
+            )
+            statesAndClusters = new
+            globalSnapshot = updateResult
+            return updateResult
     }
 
     private fun snapshotTimer(serviceName: String) = if (properties.metrics.cacheSetSnapshot) {
@@ -158,10 +147,10 @@ class SnapshotUpdater(
     private val updateSnapshotForGroupsTimer = meterRegistry.timer("snapshot-updater.update-snapshot-for-groups.time")
 
     private fun updateSnapshotForGroups(
-        groups: Collection<Group>,
         result: UpdateResult
     ): Mono<UpdateResult> {
         val sample = Timer.start()
+        val groups = result.groups
         versions.retainGroups(cache.groups())
         val results = Flux.fromIterable(groups)
             .doOnNextScheduledOn(groupSnapshotScheduler) { group ->

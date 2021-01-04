@@ -64,7 +64,7 @@ class ControlPlaneConfig {
         ControlPlane.builder(properties, meterRegistry)
             .withMetrics(metrics)
             .withEnvoyHttpFilters(envoyHttpFilters)
-            .build(globalStateChanges.combined())
+            .build(globalStateChanges::combined)
 
     @Bean
     @ConditionalOnMissingBean(ConsulServiceMapper::class)

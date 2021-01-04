@@ -1,5 +1,6 @@
 package pl.allegro.tech.servicemesh.envoycontrol.consul.services
 
+import io.envoyproxy.envoy.api.v2.Cluster
 import pl.allegro.tech.servicemesh.envoycontrol.services.LocalClusterStateChanges
 import pl.allegro.tech.servicemesh.envoycontrol.services.Locality
 import pl.allegro.tech.servicemesh.envoycontrol.services.ClusterState
@@ -17,21 +18,17 @@ class ConsulLocalClusterStateChanges(
     private val transformers: List<ServiceInstancesTransformer> = emptyList(),
     override val latestServiceState: AtomicReference<ServicesState> = AtomicReference(ServicesState())
 ) : LocalClusterStateChanges {
-    override fun stream(): Flux<MultiClusterState> =
-        consulChanges
-            .watchState()
-            .map { state ->
-                transformers
-                    .fold(state.allInstances().asSequence()) { instancesSequence, transformer ->
-                        transformer.transform(instancesSequence)
-                    }
-                    .associateBy { it.serviceName }
-                    .let(::ServicesState)
+    override fun stream(): MultiClusterState {
+        val state = consulChanges.getState()
+        val servicesState = transformers
+            .fold(state.allInstances().asSequence()) { instancesSequence, transformer ->
+                transformer.transform(instancesSequence)
             }
-            .doOnNext { latestServiceState.set(it) }
-            .map {
-                ClusterState(it, locality, cluster).toMultiClusterState()
-            }
+            .associateBy { it.serviceName }
+            .let(::ServicesState)
+        latestServiceState.set(servicesState)
+        return ClusterState(servicesState, locality, cluster).toMultiClusterState()
+    }
 
     override fun isInitialStateLoaded(): Boolean = latestServiceState.get() != ServicesState()
 }

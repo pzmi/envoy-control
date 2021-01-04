@@ -17,31 +17,12 @@ class GlobalStateChanges(
 ) {
     private val scheduler = Schedulers.newElastic("global-service-changes-combinator")
 
-    fun combined(): Flux<MultiClusterState> {
-        val clusterStatesStreams: List<Flux<MultiClusterState>> = clusterStateChanges.map { it.stream() }
-
-        if (properties.combineServiceChangesExperimentalFlow) {
-            return combinedExperimentalFlow(clusterStatesStreams)
-        }
-
-        return Flux.combineLatest(
-            clusterStatesStreams.map {
-                // if a number of items emitted by one source is very high, combineLatest may entirely ignore items
-                // emitted by other sources. publishOn with multithreaded scheduler prevents it.
-                it.publishOn(scheduler, 1)
-            },
-            1 // only prefetch one item to avoid processing stale consul states in case of backpressure
-        ) { statesArray ->
-            @Suppress("UNCHECKED_CAST")
-            (statesArray.asSequence() as Sequence<MultiClusterState>)
-                .flatten()
-                .toList()
-                .toMultiClusterState()
-        }
-            .logSuppressedError("combineLatest() suppressed exception")
-            .measureBuffer("global-service-changes-combine-latest", meterRegistry)
-            .checkpoint("global-service-changes-emitted")
-            .name("global-service-changes-emitted").metrics()
+    fun combined(): MultiClusterState {
+        return clusterStateChanges.map { it.stream() }
+            .asSequence()
+            .flatten()
+            .toList()
+            .toMultiClusterState()
     }
 
     private fun combinedExperimentalFlow(

@@ -2,6 +2,7 @@ package pl.allegro.tech.servicemesh.envoycontrol.consul.services
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
+import io.micrometer.core.instrument.MeterRegistry
 import pl.allegro.tech.discovery.consul.recipes.json.JacksonJsonDeserializer
 import pl.allegro.tech.discovery.consul.recipes.watch.Canceller
 import pl.allegro.tech.discovery.consul.recipes.watch.ConsulWatcher
@@ -12,11 +13,11 @@ import pl.allegro.tech.servicemesh.envoycontrol.EnvoyControlMetrics
 import pl.allegro.tech.servicemesh.envoycontrol.logger
 import pl.allegro.tech.servicemesh.envoycontrol.services.ServiceInstances
 import pl.allegro.tech.servicemesh.envoycontrol.services.ServicesState
-import pl.allegro.tech.servicemesh.envoycontrol.utils.measureDiscardedItems
-import reactor.core.publisher.Flux
-import reactor.core.publisher.FluxSink
 import java.time.Duration
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import pl.allegro.tech.discovery.consul.recipes.watch.catalog.ServiceInstances as RecipesServiceInstances
 import pl.allegro.tech.discovery.consul.recipes.watch.catalog.Services as RecipesServices
 
@@ -29,24 +30,35 @@ class ConsulServiceChanges(
 ) {
     private val logger by logger()
 
-    fun watchState(): Flux<ServicesState> {
+    @Volatile
+    private var servicesState: ServicesState = ServicesState()
+
+    fun watchState() {
         val watcher = StateWatcher(watcher, serviceMapper, objectMapper, metrics, subscriptionDelay)
-        return Flux.create<ServicesState>(
-            { sink ->
-                watcher.start { state: ServicesState -> sink.next(state) }
-            },
-            FluxSink.OverflowStrategy.LATEST
+        val threadPoolExecutor = ThreadPoolExecutor(
+            4, 4, 1000, TimeUnit.SECONDS,
+            ArrayBlockingQueue(1, true), MeasuredDiscardOldestPolicy(metrics.meterRegistry)
         )
-            .measureDiscardedItems("consul-service-changes-emitted", metrics.meterRegistry)
-            .checkpoint("consul-service-changes-emitted")
-            .name("consul-service-changes-emitted").metrics()
-            .distinctUntilChanged()
-            .checkpoint("consul-service-changes-emitted-distinct")
-            .name("consul-service-changes-emitted-distinct").metrics()
-            .doOnCancel {
-                logger.warn("Cancelling watching consul service changes")
-                watcher.close()
+
+        watcher.start { s ->
+            threadPoolExecutor.execute {
+                servicesState = s
             }
+
+        }
+    }
+
+    fun getState(): ServicesState {
+        return servicesState
+    }
+
+    private class MeasuredDiscardOldestPolicy(meterRegistry: MeterRegistry) : ThreadPoolExecutor.DiscardOldestPolicy() {
+        private val rejected = meterRegistry.counter("rejected")
+
+        override fun rejectedExecution(r: Runnable?, e: ThreadPoolExecutor?) {
+            super.rejectedExecution(r, e)
+            rejected.increment()
+        }
     }
 
     private class StateWatcher(
@@ -176,8 +188,10 @@ class ConsulServiceChanges(
 
         private class InitialLoader {
             private val remaining = ConcurrentHashMap.newKeySet<String>()
+
             @Volatile
             private var initialized = false
+
             @Volatile
             var ready = false
                 private set
